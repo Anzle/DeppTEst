@@ -13,6 +13,13 @@ FILE *depstats;
 extern 
 char *CommentBuffer;
 
+
+
+/* int ziv(Node*, Node*, int, int);
+int siv(Node lhs, Node rhs, int lb, int ub); */
+
+
+
 extern
 void emitFoundTrueDependenceWithDistance(char *arrayName, int distance);
 

@@ -9,7 +9,7 @@ void yyerror(char * s);
 FILE *outfile;
 FILE *depstats;
 char *CommentBuffer;
- 
+ int br;
 %}
 
 %union {tokentype token;
@@ -19,6 +19,7 @@ char *CommentBuffer;
         condexprInfo cexprInfo;
         controlexprInfo ctrlexprInfo;
         IDInfoPtr idInfo;
+        asgnexprInfo asgnInfo;
        }
 
 %token PROG PERIOD VAR 
@@ -35,6 +36,9 @@ char *CommentBuffer;
 %type <idInfo> idlist
 %type <tInfo> type
 %type <tInfo> stype
+%type <asgnInfo> astmt
+%type <targetReg> arexp
+%type <asgnInfo> stmt
 
 %start program
 
@@ -118,9 +122,9 @@ stmtlist : stmtlist ';' stmt { }
         | error { yyerror("***Error: ';' expected or illegal statement \n");}
 	;
 
-stmt    : fstmt { }
-	| astmt { }
-	| writestmt { }
+stmt    : fstmt { $$.lhs = NULL; $$.rhs = NULL; }
+	| astmt { $$.lhs = $1.lhs; $$.rhs = $1.rhs;}
+	| writestmt {$$.lhs = NULL; $$.rhs = NULL; }
 	;
 
 cmpdstmt: BEG stmtlist END { }
@@ -139,27 +143,52 @@ writestmt: PRINT '(' exp ')' { int newOffset = NextOffset(1); /* call generates 
 
 fstmt	: FOR  
           {emitComment("Unconditional branch should go here");
-		emit(NOLABEL, VECTON, EMPTY, EMPTY, EMPTY);} /* BOGUS */
+          } 
           ctrlexp DO 
           stmt { SymTabEntry *entry = lookup($3.inductionVariable);
 	         int newReg1 = NextRegister(); /* address or value of induction variable */ 
 	         int newReg2 = NextRegister(); /* address or value of induction variable */ 
 
-		 if (entry == NULL) 
-		   printf("\n*** ERROR ***: Induction variable %s not declared.\n", $3.inductionVariable);
-		 else 
-		   if ((entry->type != TYPE_INT) || (entry->rowSize != -1))
-		     printf("\n*** ERROR ***: Induction variable %s not a scalar of type integer.\n", $3.inductionVariable);
-		   else {
-		       
-		   /* increment induction variable and jump to top of loop */
-		   emit(NOLABEL, LOADAI, 0, entry->offset, newReg1);
-		   emit(NOLABEL, ADDI, newReg1, 1, newReg2);
-		   emit(NOLABEL, STOREAI, newReg2, 0, entry->offset);
-		   emit(NOLABEL, BR, $3.topOfLoopLabel, EMPTY, EMPTY);
-		   emit($3.exitLabel, NOP, EMPTY, EMPTY, EMPTY);
-		   }
+           if (entry == NULL) 
+             printf("\n*** ERROR ***: Induction variable %s not declared.\n", $3.inductionVariable);
+           else 
+             if ((entry->type != TYPE_INT) || (entry->rowSize != -1))
+               printf("\n*** ERROR ***: Induction variable %s not a scalar of type integer.\n", $3.inductionVariable);
+             else {
+              int vect = 1;
+              //dependencetesting
+              if (!$5.lhs)
+                vect =1; //No LHS
+              else if(!$5.rhs)
+                 vect = 1; //No RHS
+              else{
+                vect = ziv($5.lhs, $5.rhs, $3.lb, $3.ub);
+                if(vect == -1);
+                  vect == siv($5.lhs, $5.rhs, $3.lb, $3.ub);
+              }
+              
+            if(vect == 0){
+              emitFoundNoDependenciesAndWillVectorize();
+              emit($3.vectLabel, VECTON, EMPTY, EMPTY, EMPTY);
+              emit(NOLABEL, BR, $3.topOfLoopLabel, EMPTY, EMPTY);
+            }
+            if(vect == 1){
+              emitFoundDependenciesAndWillNotVectorize();
+              emit($3.vectLabel, NOP, EMPTY, EMPTY, EMPTY);
+              emit(NOLABEL, BR, $3.topOfLoopLabel, EMPTY, EMPTY);
+            }
+             
+             /* increment induction variable and jump to top of loop */
+             emit(NOLABEL, LOADAI, 0, entry->offset, newReg1);
+             emit(NOLABEL, ADDI, newReg1, 1, newReg2);
+             emit(NOLABEL, STOREAI, newReg2, 0, entry->offset);
+             emit(NOLABEL, BR, $3.topOfLoopLabel, EMPTY, EMPTY);
+             emit($3.exitLabel, NOP, EMPTY, EMPTY, EMPTY);
+             emit(NOLABEL, VECTOFF, EMPTY, EMPTY, EMPTY);
+             }
 		 
+     
+     
 	  }
 
           ENDFOR
@@ -184,11 +213,18 @@ astmt : lhs ASG exp             {
 				    printf("\n*** ERROR ***: Assignment types do not match.\n");
 				  }
 
-				  emit(NOLABEL,
-                                       STORE, 
-                                       $3.targetRegister,
-                                       $1.targetRegister,
-                                       EMPTY);
+				  emit(NOLABEL,STORE,$3.targetRegister,$1.targetRegister,EMPTY);
+          
+          if($1.isID ==2){
+            $$.lhs = &$1.info;
+          }
+          else $$.lhs == NULL;
+          
+          if($3.isID ==2){
+            $$.rhs = &$3.info;
+          }
+          else $$.rhs == NULL;
+          
                                 }
 	;
 
@@ -209,9 +245,11 @@ lhs	: ID			{ SymTabEntry *entry = lookup($1.str);
 				    emitComment(CommentBuffer);
 				    emit(NOLABEL, LOADI, entry->offset, newReg1, EMPTY);
 				    emit(NOLABEL, ADD, 0, newReg1, newReg2);
+            
+            $$.isID = 1;
 				  }
                                 }
-	|  ID '[' exp ']'	{ 
+	|  ID '[' arexp ']'	{ 
 		  SymTabEntry *entry = lookup($1.str);
 			  int newReg = NextRegister();
 				  int constFourReg = NextRegister();
@@ -221,7 +259,13 @@ lhs	: ID			{ SymTabEntry *entry = lookup($1.str);
 				  int relativeAddrReg = NextRegister();
 
 			  $$.targetRegister = newReg;
-
+        
+        
+        $$.info.arr = $1.str;
+        $$.info.a = $3.info.a;
+        $$.info.c = $3.info.c;
+        $$.isID = 2;
+        
 			  if (entry == NULL) 
 	printf("\n*** ERROR ***: Variable %s not declared.\n", $1.str);
 	else {
@@ -248,33 +292,64 @@ lhs	: ID			{ SymTabEntry *entry = lookup($1.str);
 
 exp	: exp '+' exp		{ int newReg = NextRegister();
 
-                                  if (! (($1.type == TYPE_INT) && ($3.type == TYPE_INT))) {
-    				    printf("\n*** ERROR ***: Operand type must be integer.\n");
-                                  }
-                                  $$.type = $1.type;
+                        if (! (($1.type == TYPE_INT) && ($3.type == TYPE_INT))) {
+                          printf("\n*** ERROR ***: Operand type must be integer.\n");
+                        }
+                        $$.type = $1.type;
 
-                                  $$.targetRegister = newReg;
-                                  emit(NOLABEL, 
-                                       ADD, 
-                                       $1.targetRegister, 
-                                       $3.targetRegister, 
-                                       newReg);
-                                }
+                        $$.targetRegister = newReg;
+                        emit(NOLABEL, 
+                             ADD, 
+                             $1.targetRegister, 
+                             $3.targetRegister, 
+                             newReg);
+                        if($1.isID == 2){
+                          $$.info.a = $1.info.a;
+                          $$.info.c = $1.info.c;
+                          $$.info.arr = $1.info.arr;
+                          $$.isID = 2; //Its array
+                          if($3.isID == 2)
+                            $$.info.next = &$3.info;
+                        }
+                        else if($3.isID == 2){
+                          $$.info.a = $3.info.a;
+                          $$.info.c = $3.info.c;
+                          $$.info.arr = $3.info.arr;
+                          $$.isID = 2; //Its array
+                        }
+                        
+                        
+                      }
 
-        | exp '-' exp		{ int newReg = NextRegister(); 
+    | exp '-' exp		{ int newReg = NextRegister(); 
 
-                                  if (! (($1.type == TYPE_INT) && ($3.type == TYPE_INT))) {
-    				    printf("\n*** ERROR ***: Operand type must be integer.\n");
-                                  }
-                                  $$.type = $1.type;
+                            if (! (($1.type == TYPE_INT) && ($3.type == TYPE_INT))) {
+          printf("\n*** ERROR ***: Operand type must be integer.\n");
+                            }
+                            $$.type = $1.type;
 
-                                  $$.targetRegister = newReg;
-                                  emit(NOLABEL, 
-                                       SUB, 
-                                       $1.targetRegister, 
-                                       $3.targetRegister, 
-                                       newReg);
-                                }
+                            $$.targetRegister = newReg;
+                            emit(NOLABEL, 
+                                 SUB, 
+                                 $1.targetRegister, 
+                                 $3.targetRegister, 
+                                 newReg);
+                        if($1.isID == 2){
+                          $$.info.a = $1.info.a;
+                          $$.info.c = $1.info.c;
+                          $$.info.arr = $1.info.arr;
+                          $$.isID = 2; //Its array
+                          if($3.isID == 2)
+                            $$.info.next = &$3.info;
+                        }
+                        else if($3.isID == 2){
+                          $$.info.a = $3.info.a;
+                          $$.info.c = $3.info.c;
+                          $$.info.arr = $3.info.arr;
+                          $$.isID = 2; //Its array
+                        }
+                          
+                          }
 
 	| exp '*' exp		{ int newReg = NextRegister(); 
 
@@ -289,6 +364,20 @@ exp	: exp '+' exp		{ int newReg = NextRegister();
                                        $1.targetRegister, 
                                        $3.targetRegister, 
                                        newReg);
+                        if($1.isID == 2){
+                          $$.info.a = $1.info.a;
+                          $$.info.c = $1.info.c;
+                          $$.info.arr = $1.info.arr;
+                          $$.isID = 2; //Its array
+                          if($3.isID == 2)
+                            $$.info.next = &$3.info;
+                        }
+                        else if($3.isID == 2){
+                          $$.info.a = $3.info.a;
+                          $$.info.c = $3.info.c;
+                          $$.info.arr = $3.info.arr;
+                          $$.isID = 2; //Its array
+                        }
                                 }
 
 	| exp AND exp		{ int newReg = NextRegister();
@@ -324,7 +413,7 @@ exp	: exp '+' exp		{ int newReg = NextRegister();
         | ID			{ SymTabEntry *entry = lookup($1.str);
 	                          int newReg = NextRegister();
 	                          $$.targetRegister = newReg;
-
+                            $$.isID = 1;
 	                          if (entry == NULL) 
 				    printf("\n*** ERROR ***: Variable %s not declared.\n", $1.str);
 				  else {
@@ -339,59 +428,185 @@ exp	: exp '+' exp		{ int newReg = NextRegister();
                                   }
 	                        }
 
-        | ID '[' exp ']'	{ SymTabEntry *entry = lookup($1.str);
-	                          int newReg = NextRegister();
-                                  int constFourReg = NextRegister();
-                                  int offsetReg = NextRegister();
-                                  /* int exprReg2 = NextRegister();*/
-                                  int baseAddrReg = NextRegister();
-                                  int relativeAddrReg = NextRegister();
-				  
-	                          $$.targetRegister = newReg;
+    | ID '[' arexp ']'	
+      { SymTabEntry *entry = lookup($1.str);
+        int newReg = NextRegister();
+        int constFourReg = NextRegister();
+        int offsetReg = NextRegister();
+        /* int exprReg2 = NextRegister();*/
+        int baseAddrReg = NextRegister();
+        int relativeAddrReg = NextRegister();
 
-	                          if (entry == NULL) 
-				    printf("\n*** ERROR ***: Variable %s not declared.\n", $1.str);
-				  else {
-  	                            if (entry->rowSize != 0) 
-				      printf("\n*** ERROR ***: Variable %s is not an array variable.\n", $1.str);
+        $$.targetRegister = newReg;
 
-	                            if ($3.type != TYPE_INT) 
-				      printf("\n*** ERROR ***: Array variable %s index type must be integer.\n", $1.str);
+        if (entry == NULL) 
+          printf("\n*** ERROR ***: Variable %s not declared.\n", $1.str);
+        else {
+          if (entry->rowSize != 0) 
+          printf("\n*** ERROR ***: Variable %s is not an array variable.\n", $1.str);
 
-				    $$.type = entry->type;
-				    sprintf(CommentBuffer, 
-                                            "Load RHS value of array variable \"%s\" with based address %d", 
-                                            entry->name, entry->offset);
-				    emitComment(CommentBuffer);
+          if ($3.type != TYPE_INT) 
+          printf("\n*** ERROR ***: Array variable %s index type must be integer.\n", $1.str);
 
-				    emit(NOLABEL, LOADI, 4, constFourReg, EMPTY);
-                                    emit(NOLABEL, MULT, $3.targetRegister, constFourReg, offsetReg);
-                                    emit(NOLABEL, LOADI, entry->offset, baseAddrReg, EMPTY);
-				    emit(NOLABEL, ADD, baseAddrReg, offsetReg, relativeAddrReg);
-				    emit(NOLABEL, LOADAO, 0, relativeAddrReg, newReg);
-				  }
-	                        }
+          $$.type = entry->type;
+          sprintf(CommentBuffer, 
+          "Load RHS value of array variable \"%s\" with based address %d", 
+          entry->name, entry->offset);
+          emitComment(CommentBuffer);
+
+          emit(NOLABEL, LOADI, 4, constFourReg, EMPTY);
+          emit(NOLABEL, MULT, $3.targetRegister, constFourReg, offsetReg);
+          emit(NOLABEL, LOADI, entry->offset, baseAddrReg, EMPTY);
+          emit(NOLABEL, ADD, baseAddrReg, offsetReg, relativeAddrReg);
+          emit(NOLABEL, LOADAO, 0, relativeAddrReg, newReg);
+          
+          $$.info.a = $3.info.a;
+          $$.info.c = $3.info.c;
+          $$.info.arr = $1.str;
+          $$.isID = 2; //Its array
+        }
+      }
 
 
 
 	| ICONST                 { int newReg = NextRegister();
 	                           $$.targetRegister = newReg;
 				   $$.type = TYPE_INT;
-				   emit(NOLABEL, LOADI, $1.num, newReg, EMPTY); }
+				   emit(NOLABEL, LOADI, $1.num, newReg, EMPTY); 
+           $$.isID = 0;
+           
+           
+           }
 
         | TRUE                   { int newReg = NextRegister(); /* TRUE is encoded as value '1' */
 	                           $$.targetRegister = newReg;
 				   $$.type = TYPE_BOOL;
-				   emit(NOLABEL, LOADI, 1, newReg, EMPTY); }
+				   emit(NOLABEL, LOADI, 1, newReg, EMPTY); 
+           $$.isID = 0;
+           }
+           
 
         | FALSE                   { int newReg = NextRegister(); /* TRUE is encoded as value '0' */
 	                           $$.targetRegister = newReg;
 				   $$.type = TYPE_BOOL;
-				   emit(NOLABEL, LOADI, 0, newReg, EMPTY); }
+				   emit(NOLABEL, LOADI, 0, newReg, EMPTY); 
+           $$.isID = 0;}
 
 	| error { yyerror("***Error: illegal expression\n");}  
 	;
 
+  
+arexp	: arexp '+' arexp		
+        { int newReg = NextRegister();
+
+          if (! (($1.type == TYPE_INT) && ($3.type == TYPE_INT))) {
+            printf("\n*** ERROR ***: Operand type must be integer.\n");
+          }
+          $$.type = $1.type;
+
+          $$.targetRegister = newReg;
+          emit(NOLABEL, ADD, $1.targetRegister, $3.targetRegister, newReg);
+          if($3.isID == 0)
+            $$.info.c = $3.val;
+
+          }
+
+      | arexp '-' arexp		
+      { int newReg = NextRegister(); 
+        if (! (($1.type == TYPE_INT) && ($3.type == TYPE_INT))) {
+          printf("\n*** ERROR ***: Operand type must be integer.\n");
+        }
+        $$.type = $1.type;
+
+        $$.targetRegister = newReg;
+        emit(NOLABEL,SUB, $1.targetRegister, $3.targetRegister, newReg);
+        if($3.isID == 0)
+            $$.info.c = $3.val;
+        }
+
+      | arexp '*' arexp		
+        { int newReg = NextRegister(); 
+          if (! (($1.type == TYPE_INT) && ($3.type == TYPE_INT))) {
+             printf("\n*** ERROR ***: Operand type must be integer.\n");
+          }
+          $$.type = $1.type;
+
+          $$.targetRegister = newReg;
+          emit(NOLABEL,MULT, $1.targetRegister, $3.targetRegister, newReg);
+          if($1.isID == 0)
+            $$.info.a = $1.val;
+          }
+
+
+      | ID			
+      { SymTabEntry *entry = lookup($1.str);
+        int newReg = NextRegister();
+        $$.targetRegister = newReg;
+
+        if (entry == NULL) 
+          printf("\n*** ERROR ***: Variable %s not declared.\n", $1.str);
+        else {
+          if (entry->rowSize != -1) 
+          printf("\n*** ERROR ***: Variable %s is not a scalar variable.\n", $1.str);
+
+          $$.type = entry->type;
+          sprintf(CommentBuffer, "Load RHS value of variable \"%s\" at offset %d", 
+          entry->name, entry->offset);
+          emitComment(CommentBuffer);
+          emit(NOLABEL, LOADAI, 0, entry->offset, newReg);
+        }
+        $$.isID = 1;
+      }
+
+      | ID '[' arexp ']'	
+      { SymTabEntry *entry = lookup($1.str);
+        int newReg = NextRegister();
+        int constFourReg = NextRegister();
+        int offsetReg = NextRegister();
+        /* int exprReg2 = NextRegister();*/
+        int baseAddrReg = NextRegister();
+        int relativeAddrReg = NextRegister();
+
+        $$.targetRegister = newReg;
+
+        if (entry == NULL) 
+          printf("\n*** ERROR ***: Variable %s not declared.\n", $1.str);
+        else {
+          if (entry->rowSize != 0) 
+          printf("\n*** ERROR ***: Variable %s is not an array variable.\n", $1.str);
+
+          if ($3.type != TYPE_INT) 
+          printf("\n*** ERROR ***: Array variable %s index type must be integer.\n", $1.str);
+
+          $$.type = entry->type;
+          sprintf(CommentBuffer, 
+          "Load RHS value of array variable \"%s\" with based address %d", 
+          entry->name, entry->offset);
+          emitComment(CommentBuffer);
+
+          emit(NOLABEL, LOADI, 4, constFourReg, EMPTY);
+          emit(NOLABEL, MULT, $3.targetRegister, constFourReg, offsetReg);
+          emit(NOLABEL, LOADI, entry->offset, baseAddrReg, EMPTY);
+          emit(NOLABEL, ADD, baseAddrReg, offsetReg, relativeAddrReg);
+          emit(NOLABEL, LOADAO, 0, relativeAddrReg, newReg);
+          
+          $$.info.a = $3.info.a;
+          $$.info.c = $3.info.c;
+          $$.info.arr = $1.str;
+          $$.isID = 2; //Its array
+        }
+      }
+
+
+
+| ICONST { int newReg = NextRegister();
+            $$.targetRegister = newReg;
+            $$.type = TYPE_INT;
+            emit(NOLABEL, LOADI, $1.num, newReg, EMPTY); 
+            $$.val = $1.num; //Save the number
+            $$.isID = 0;
+            }
+;
 
 ctrlexp	: ID ASG ICONST ',' ICONST { int newReg1 = NextRegister(); 
                                      int newReg2 = NextRegister(); 
@@ -409,10 +624,17 @@ ctrlexp	: ID ASG ICONST ',' ICONST { int newReg1 = NextRegister();
 				     $$.inductionVariable = $1.str;
 				     $$.topOfLoopLabel = topOfLoopBranch; 
 				     $$.exitLabel = falseBranch; 
-
+             $$.vectLabel = NextLabel();
+             //Set the for bounds
+             $$.lb = $3.num;
+             $$.ub = $5.num;
+             
 				     if (entry == NULL) 
 				       printf("\n*** ERROR ***: Induction variable %s not declared.\n", $1.str);
 				     else {
+               
+               emitComment("Vecton break");
+               emit(NOLABEL, BR, $$.vectLabel, EMPTY, EMPTY);
 				       sprintf(CommentBuffer, 
                                             "Initialize ind. variable \"%s\" at offset %d with lower bound value %d", 
                                             entry->name, entry->offset, $3.num);
